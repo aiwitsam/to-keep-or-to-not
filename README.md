@@ -4,7 +4,7 @@
 
 A Shakespeare-themed CLI tool for backing up project directories to external drives. Uses rsync for incremental snapshots with hardlink deduplication, so repeated backups of unchanged files cost zero extra space.
 
-Built as a companion to [togit](https://github.com/margo928/git-to-github-or-to-not) (optional -- works standalone too).
+Built as a companion to [togit](https://github.com/aiwitsam/git-to-github-or-to-not) (optional -- works standalone too).
 
 ## Why
 
@@ -99,7 +99,7 @@ When rsync runs with `--link-dest` pointing to the previous snapshot, unchanged 
 
 ### togit Integration
 
-If [togit](https://github.com/margo928/git-to-github-or-to-not) is installed in the same venv, tokeep automatically:
+If [togit](https://github.com/aiwitsam/git-to-github-or-to-not) is installed in the same venv, tokeep automatically:
 
 - **Auto-includes** projects with `git` or `github` decisions
 - **Excludes** projects with `deny` decisions
