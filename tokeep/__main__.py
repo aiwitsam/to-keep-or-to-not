@@ -5,8 +5,8 @@ import sys
 
 from tokeep import __version__
 from tokeep.config import (
-    load_config, load_backup_history, save_backup_record, BackupRecord,
-    load_togit_decisions,
+    load_config, save_config, load_backup_history, save_backup_record,
+    BackupRecord, load_togit_decisions, CONFIG_FILE,
 )
 from tokeep.drives import find_external_drives, validate_drive
 from tokeep.planner import scan_projects, build_plan
@@ -18,9 +18,9 @@ from tokeep.presenter import (
     show_backup_plan, confirm_backup, create_backup_progress,
     show_backup_result, show_verify_result, show_snapshot_list,
     show_prune_plan, confirm_prune, show_history,
-    show_schedule_confirmation, show_farewell,
+    show_schedule_confirmation, show_restore_result,
+    show_encrypt_result, show_init_complete, show_farewell,
 )
-from tokeep.shakespeare import get_farewell
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -34,13 +34,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     # run — non-interactive backup with saved config
     run_parser = sub.add_parser("run", help="Run backup (non-interactive with flags)")
-    run_parser.add_argument("--drive", metavar="PATH", help="Target drive or directory")
+    run_parser.add_argument("--drive", metavar="PATH", help="Target drive(s), comma-separated for multi-drive")
     run_parser.add_argument("--all", action="store_true", help="Back up all non-denied projects")
     run_parser.add_argument("--include", metavar="NAMES", help="Only these projects (comma-separated)")
     run_parser.add_argument("--exclude", metavar="NAMES", help="Skip these projects (comma-separated)")
     run_parser.add_argument("--dry-run", action="store_true", help="Show plan without executing")
     run_parser.add_argument("--yes", action="store_true", help="Skip confirmation prompts")
     run_parser.add_argument("--quiet", action="store_true", help="Minimal output (for cron)")
+    run_parser.add_argument("--bwlimit", metavar="RATE", help="Bandwidth limit for rsync (e.g. 10m, 1000k)")
+    run_parser.add_argument("--encrypt", action="store_true", help="Encrypt snapshot with GPG after backup")
 
     # drives — list detected drives
     sub.add_parser("drives", help="List detected external drives")
@@ -71,6 +73,18 @@ def build_parser() -> argparse.ArgumentParser:
     # history — show backup log
     sub.add_parser("history", help="Show backup history")
 
+    # restore — restore from backup
+    restore_parser = sub.add_parser("restore", help="Restore a project from backup")
+    restore_parser.add_argument("--drive", metavar="PATH", required=True, help="Source drive")
+    restore_parser.add_argument("--project", metavar="NAME", required=True, help="Project name to restore")
+    restore_parser.add_argument("--to", metavar="PATH", required=True, help="Destination path")
+    restore_parser.add_argument("--snapshot", metavar="NAME", help="Specific snapshot (default: latest)")
+    restore_parser.add_argument("--dry-run", action="store_true", help="Show what would be restored")
+
+    # init — config wizard
+    init_parser = sub.add_parser("init", help="Initialize configuration interactively")
+    init_parser.add_argument("--force", action="store_true", help="Overwrite existing config")
+
     return parser
 
 
@@ -82,62 +96,36 @@ def cmd_drives(args):
     show_farewell()
 
 
-def cmd_run(args):
-    """Non-interactive backup with flags."""
-    config = load_config()
-    quiet = getattr(args, "quiet", False)
-
-    if not quiet:
-        show_header()
-
-    # Resolve drive
-    drive_path = args.drive
-    if not drive_path:
-        console.print("[red]Error: --drive PATH is required for 'run' command.[/]")
-        console.print("[dim]Use 'tokeep drives' to see available drives.[/]")
-        sys.exit(1)
-
+def _run_single_drive(args, config, drive_path, projects, quiet):
+    """Execute backup for a single drive. Returns BackupResult."""
     drive = validate_drive(drive_path)
     if not drive:
         console.print(f"[red]Error: '{drive_path}' is not a valid writable drive/directory.[/]")
-        sys.exit(1)
+        return None
 
-    # Scan projects
-    if not quiet:
-        console.print("[dim]Scanning the realm for projects...[/]")
-    projects = scan_projects(config)
-
-    if not projects:
-        console.print("[yellow]No projects found.[/]")
-        sys.exit(0)
-
-    # Parse include/exclude
     include = [n.strip() for n in args.include.split(",")] if args.include else None
     exclude = [n.strip() for n in args.exclude.split(",")] if args.exclude else None
+    bwlimit = getattr(args, "bwlimit", None) or config.get("backup", {}).get("bwlimit")
 
-    # Build plan
     plan = build_plan(config, drive_path, projects, include=include, exclude=exclude, all_projects=args.all)
 
     if not plan.projects:
-        console.print("[yellow]No projects selected for backup.[/]")
-        sys.exit(0)
+        console.print(f"[yellow]No projects selected for backup to {drive_path}.[/]")
+        return None
 
     if not quiet:
         show_backup_plan(plan, dry_run=args.dry_run)
 
-    # Space check
     if plan.space_check and not plan.space_check.has_space:
         console.print(f"[red]Insufficient space on {drive_path}.[/]")
         console.print(f"[red]Need: {plan.space_check.needed_human}, Free: {plan.space_check.free_human}[/]")
-        sys.exit(1)
+        return None
 
-    # Confirm
     if not args.dry_run and not args.yes and not quiet:
         if not confirm_backup():
             console.print("[dim]Backup cancelled.[/]")
-            return
+            return None
 
-    # Execute backup
     if not quiet:
         progress = create_backup_progress()
         tasks = {}
@@ -149,20 +137,29 @@ def cmd_run(args):
         with progress:
             for project in plan.projects:
                 tasks[project.name] = progress.add_task(project.name, total=100)
-
-            result = run_backup(plan, progress_callback=progress_callback, dry_run=args.dry_run)
+            result = run_backup(plan, progress_callback=progress_callback, dry_run=args.dry_run, bwlimit=bwlimit)
     else:
-        result = run_backup(plan, dry_run=args.dry_run)
+        result = run_backup(plan, dry_run=args.dry_run, bwlimit=bwlimit)
 
     # Create manifest
     if not args.dry_run and result.projects_synced > 0:
-        from pathlib import Path as P
-        snapshot_path = str(P(plan.vault_path) / plan.snapshot_name)
+        from pathlib import Path
+        snapshot_path = str(Path(plan.vault_path) / plan.snapshot_name)
         synced_names = [name for name, ok in result.project_results.items() if ok]
         manifest = create_manifest(snapshot_path, synced_names)
         save_manifest(manifest, snapshot_path)
 
-    # Show result
+        # Optional encryption
+        if getattr(args, "encrypt", False):
+            gpg_key = config.get("backup", {}).get("gpg_key_id")
+            if gpg_key:
+                from tokeep.encryption import encrypt_snapshot
+                enc_result = encrypt_snapshot(snapshot_path, gpg_key)
+                if not quiet:
+                    show_encrypt_result(enc_result)
+            elif not quiet:
+                console.print("[yellow]--encrypt specified but no gpg_key_id in config. Skipping.[/]")
+
     if not quiet:
         show_backup_result(result)
 
@@ -179,10 +176,52 @@ def cmd_run(args):
         )
         save_backup_record(record)
 
+    # Notifications
+    from tokeep.notify import send_backup_notification
+    send_backup_notification(config, result)
+
+    return result
+
+
+def cmd_run(args):
+    """Non-interactive backup with flags, supports multi-drive."""
+    config = load_config()
+    quiet = getattr(args, "quiet", False)
+
+    if not quiet:
+        show_header()
+
+    drive_arg = args.drive
+    if not drive_arg:
+        console.print("[red]Error: --drive PATH is required for 'run' command.[/]")
+        console.print("[dim]Use 'tokeep drives' to see available drives.[/]")
+        sys.exit(1)
+
+    # Scan projects once
+    if not quiet:
+        console.print("[dim]Scanning the realm for projects...[/]")
+    projects = scan_projects(config)
+
+    if not projects:
+        console.print("[yellow]No projects found.[/]")
+        sys.exit(0)
+
+    # Multi-drive support: split on commas
+    drive_paths = [d.strip() for d in drive_arg.split(",")]
+    any_failed = False
+
+    for i, drive_path in enumerate(drive_paths):
+        if len(drive_paths) > 1 and not quiet:
+            console.print(f"\n[bold cyan]--- Drive {i + 1}/{len(drive_paths)}: {drive_path} ---[/]\n")
+
+        result = _run_single_drive(args, config, drive_path, projects, quiet)
+        if result is None or (result and result.projects_failed > 0):
+            any_failed = True
+
     if not quiet:
         show_farewell()
 
-    if result.projects_failed > 0:
+    if any_failed:
         sys.exit(1)
 
 
@@ -191,11 +230,9 @@ def cmd_interactive(args):
     config = load_config()
     show_header()
 
-    # Detect drives
     drives = find_external_drives()
     show_drive_list(drives)
 
-    # Also allow manual path entry
     drive = None
     if drives:
         drive = prompt_drive_selection(drives)
@@ -209,7 +246,6 @@ def cmd_interactive(args):
             console.print(f"[red]'{path}' is not a valid writable directory.[/]")
             return
 
-    # Scan projects
     console.print("[dim]Scanning the realm for projects...[/]")
     projects = scan_projects(config)
     togit_decisions = load_togit_decisions()
@@ -220,7 +256,6 @@ def cmd_interactive(args):
 
     console.print(f"[dim]Found {len(projects)} projects.[/]\n")
 
-    # Show project selection
     show_project_selection(projects, togit_decisions)
     selected = prompt_project_selection(projects, togit_decisions)
 
@@ -229,9 +264,8 @@ def cmd_interactive(args):
         show_farewell()
         return
 
-    # Build plan
     plan = build_plan(config, drive.mount_point, projects)
-    plan.projects = selected  # Override with interactive selection
+    plan.projects = selected
 
     show_backup_plan(plan)
 
@@ -239,7 +273,7 @@ def cmd_interactive(args):
         console.print("[dim]Backup cancelled.[/]")
         return
 
-    # Execute
+    bwlimit = config.get("backup", {}).get("bwlimit")
     progress = create_backup_progress()
     tasks = {}
 
@@ -250,20 +284,17 @@ def cmd_interactive(args):
     with progress:
         for project in plan.projects:
             tasks[project.name] = progress.add_task(project.name, total=100)
+        result = run_backup(plan, progress_callback=progress_callback, bwlimit=bwlimit)
 
-        result = run_backup(plan, progress_callback=progress_callback)
-
-    # Create manifest
     if result.projects_synced > 0:
-        from pathlib import Path as P
-        snapshot_path = str(P(plan.vault_path) / plan.snapshot_name)
+        from pathlib import Path
+        snapshot_path = str(Path(plan.vault_path) / plan.snapshot_name)
         synced_names = [name for name, ok in result.project_results.items() if ok]
         manifest = create_manifest(snapshot_path, synced_names)
         save_manifest(manifest, snapshot_path)
 
     show_backup_result(result)
 
-    # Save history
     record = BackupRecord(
         drive_path=drive.mount_point,
         snapshot_name=plan.snapshot_name,
@@ -275,12 +306,16 @@ def cmd_interactive(args):
     )
     save_backup_record(record)
 
+    from tokeep.notify import send_backup_notification
+    send_backup_notification(config, result)
+
     show_farewell()
 
 
 def cmd_status(args):
     """Show snapshots on a drive."""
     from tokeep.retention import list_snapshots
+    from pathlib import Path
 
     config = load_config()
     show_header()
@@ -298,7 +333,6 @@ def cmd_status(args):
             return
 
     vault_name = config.get("backup", {}).get("vault_name", "tokeep-vault")
-    from pathlib import Path
     vault_path = str(Path(drive_path) / vault_name)
 
     snapshots = list_snapshots(vault_path)
@@ -317,7 +351,6 @@ def cmd_verify(args):
     vault_name = config.get("backup", {}).get("vault_name", "tokeep-vault")
     vault_path = Path(args.drive) / vault_name
 
-    # Find snapshot
     if args.snapshot:
         snapshot_path = vault_path / args.snapshot
     else:
@@ -415,6 +448,126 @@ def cmd_history(args):
     show_farewell()
 
 
+def cmd_restore(args):
+    """Restore a project from backup."""
+    from tokeep.restore import restore_project, list_projects_in_snapshot
+    from pathlib import Path
+
+    config = load_config()
+    show_header()
+
+    vault_name = config.get("backup", {}).get("vault_name", "tokeep-vault")
+    vault_path = Path(args.drive) / vault_name
+
+    # Find snapshot
+    if args.snapshot:
+        snapshot_path = vault_path / args.snapshot
+    else:
+        latest = vault_path / "latest"
+        if latest.is_symlink():
+            snapshot_path = latest.resolve()
+        else:
+            console.print("[red]No 'latest' symlink found. Use --snapshot NAME.[/]")
+            return
+
+    if not snapshot_path.exists():
+        console.print(f"[red]Snapshot not found: {snapshot_path}[/]")
+        return
+
+    # Check project exists in snapshot
+    available = list_projects_in_snapshot(str(snapshot_path))
+    if args.project not in available:
+        console.print(f"[red]Project '{args.project}' not found in snapshot.[/]")
+        if available:
+            console.print(f"[dim]Available: {', '.join(available)}[/]")
+        return
+
+    dest = args.to
+    console.print(f"[dim]Restoring {args.project} from {snapshot_path.name} to {dest}...[/]")
+
+    result = restore_project(
+        snapshot_path=str(snapshot_path),
+        project_name=args.project,
+        dest_path=dest,
+        dry_run=getattr(args, "dry_run", False),
+    )
+
+    show_restore_result(result)
+    show_farewell()
+
+
+def cmd_init(args):
+    """Interactive configuration wizard."""
+    from rich.prompt import Prompt
+
+    show_header()
+
+    if CONFIG_FILE.exists() and not args.force:
+        console.print(f"[yellow]Config already exists at {CONFIG_FILE}[/]")
+        console.print("[dim]Use --force to overwrite.[/]")
+        return
+
+    config = load_config()
+
+    console.print("[bold]Let us prepare thy configuration![/]\n")
+
+    # Scan path
+    scan_path = Prompt.ask("Scan path (directory to discover projects)", default=config["scan_path"])
+    config["scan_path"] = scan_path
+
+    # Vault name
+    vault_name = Prompt.ask("Vault name (directory on drive)", default=config["backup"]["vault_name"])
+    config["backup"]["vault_name"] = vault_name
+
+    # Retention count
+    retention = Prompt.ask("Snapshots to keep", default=str(config["backup"]["retention_count"]))
+    try:
+        config["backup"]["retention_count"] = int(retention)
+    except ValueError:
+        console.print("[yellow]Invalid number, keeping default.[/]")
+
+    # Deny list patterns
+    console.print("\n[bold]Deny list patterns[/] (substring matches to always exclude)")
+    console.print("[dim]Current: " + (", ".join(config["deny_list"]["patterns"]) or "none") + "[/]")
+    patterns_input = Prompt.ask("Patterns (comma-separated, or 'none')", default="none")
+    if patterns_input.lower() != "none":
+        config["deny_list"]["patterns"] = [p.strip() for p in patterns_input.split(",") if p.strip()]
+
+    # Deny list paths
+    console.print("\n[bold]Deny list paths[/] (explicit directories to always exclude)")
+    console.print("[dim]Current: " + (", ".join(config["deny_list"]["paths"]) or "none") + "[/]")
+    paths_input = Prompt.ask("Paths (comma-separated, or 'none')", default="none")
+    if paths_input.lower() != "none":
+        config["deny_list"]["paths"] = [p.strip() for p in paths_input.split(",") if p.strip()]
+
+    # Bandwidth limit
+    console.print("\n[bold]Bandwidth limit[/] (for rsync, e.g. 10m, 5000k)")
+    bwlimit = Prompt.ask("Bandwidth limit (or 'none')", default="none")
+    if bwlimit.lower() != "none":
+        config["backup"]["bwlimit"] = bwlimit
+
+    # GPG key
+    console.print("\n[bold]GPG encryption[/] (optional, for --encrypt flag)")
+    gpg_key = Prompt.ask("GPG key ID (or 'none')", default="none")
+    if gpg_key.lower() != "none":
+        config["backup"]["gpg_key_id"] = gpg_key
+
+    # Notifications
+    console.print("\n[bold]Notifications[/]")
+    from rich.prompt import Confirm
+    notify = Confirm.ask("Enable desktop notifications after backup?", default=False)
+    if notify:
+        config["notifications"] = {"enabled": True, "desktop": True}
+
+        email = Prompt.ask("Email for backup reports (or 'none')", default="none")
+        if email.lower() != "none":
+            config["notifications"]["email"] = email
+
+    save_config(config)
+    show_init_complete(str(CONFIG_FILE))
+    show_farewell()
+
+
 def main():
     parser = build_parser()
     args = parser.parse_args()
@@ -434,8 +587,11 @@ def main():
             cmd_schedule(args)
         elif args.command == "history":
             cmd_history(args)
+        elif args.command == "restore":
+            cmd_restore(args)
+        elif args.command == "init":
+            cmd_init(args)
         else:
-            # Default: interactive mode
             cmd_interactive(args)
     except KeyboardInterrupt:
         console.print("\n[dim]Exit, pursued by a bear.[/]\n")

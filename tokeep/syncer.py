@@ -45,6 +45,7 @@ def _build_rsync_cmd(
     exclude_patterns: list[str],
     link_dest: Optional[str] = None,
     dry_run: bool = False,
+    bwlimit: Optional[str] = None,
 ) -> list[str]:
     """Build the rsync command with all flags."""
     cmd = [
@@ -65,6 +66,9 @@ def _build_rsync_cmd(
 
     if dry_run:
         cmd.append("--dry-run")
+
+    if bwlimit:
+        cmd.append(f"--bwlimit={bwlimit}")
 
     # Trailing slash on source means "contents of", not the dir itself
     if not source.endswith("/"):
@@ -105,6 +109,7 @@ def sync_project(
     exclude_patterns: list[str],
     link_dest: Optional[str] = None,
     dry_run: bool = False,
+    bwlimit: Optional[str] = None,
     progress_callback: Optional[Callable[[str, int], None]] = None,
 ) -> ProjectSyncResult:
     """Sync a single project via rsync.
@@ -124,7 +129,7 @@ def sync_project(
     # Ensure destination exists
     Path(dest_path).mkdir(parents=True, exist_ok=True)
 
-    cmd = _build_rsync_cmd(source_path, dest_path, exclude_patterns, link_dest, dry_run)
+    cmd = _build_rsync_cmd(source_path, dest_path, exclude_patterns, link_dest, dry_run, bwlimit)
 
     try:
         process = subprocess.Popen(
@@ -173,6 +178,7 @@ def run_backup(
     plan,
     progress_callback: Optional[Callable[[str, int], None]] = None,
     dry_run: bool = False,
+    bwlimit: Optional[str] = None,
 ) -> BackupResult:
     """Execute a full backup plan, syncing all projects sequentially.
 
@@ -204,6 +210,7 @@ def run_backup(
             exclude_patterns=plan.exclude_patterns,
             link_dest=prev_dest,
             dry_run=dry_run,
+            bwlimit=bwlimit,
             progress_callback=progress_callback,
         )
 

@@ -14,7 +14,13 @@ Git is not a backup. If your machine dies, local-only repos are gone. This tool 
 - **Hardlink dedup** -- unchanged files between snapshots share disk blocks (via rsync `--link-dest`)
 - **Integrity verification** -- structural checksums per project, with optional deep content hashing
 - **Retention pruning** -- automatically remove old snapshots beyond a configurable keep count
+- **Restore** -- pull projects back from any snapshot
+- **Multi-drive** -- back up to multiple drives in one command
+- **Encryption** -- optional GPG encryption of snapshots
+- **Bandwidth limiting** -- throttle rsync for slow drives
+- **Notifications** -- desktop and email alerts after backups
 - **Cron scheduling** -- set it and forget it
+- **Config wizard** -- interactive setup via `tokeep init`
 - **togit integration** -- if you use togit, backup decisions follow your git/github/skip/deny choices
 
 ## Install
@@ -33,6 +39,12 @@ pip install -e ~/to-keep-or-to-not
 **Requirements:** Python 3.10+, rsync, rich, pyyaml
 
 ## Usage
+
+### First-Time Setup
+
+```bash
+tokeep init              # Interactive config wizard
+```
 
 ### Interactive Mode
 
@@ -56,6 +68,28 @@ tokeep run --drive /mnt/d --all --dry-run
 
 # Skip confirmation (for scripts/cron)
 tokeep run --drive /mnt/d --all --yes --quiet
+
+# Multi-drive: back up to two drives at once
+tokeep run --drive /mnt/d,/mnt/e --all --yes
+
+# Limit bandwidth (useful for slow USB drives)
+tokeep run --drive /mnt/d --all --bwlimit 10m
+
+# Encrypt snapshot with GPG after backup
+tokeep run --drive /mnt/d --all --encrypt
+```
+
+### Restore
+
+```bash
+# Restore a project from the latest snapshot
+tokeep restore --drive /mnt/d --project myproject --to ~/restored/
+
+# Restore from a specific snapshot
+tokeep restore --drive /mnt/d --project myproject --to ~/restored/ --snapshot 2026-03-08T14-30-00
+
+# Preview what would be restored
+tokeep restore --drive /mnt/d --project myproject --to ~/restored/ --dry-run
 ```
 
 ### Other Commands
@@ -109,7 +143,7 @@ Works fine without togit -- falls back to its own project scanner.
 
 ## Configuration
 
-Config lives at `~/.tokeep/config.yaml` (auto-created with defaults):
+Run `tokeep init` for interactive setup, or edit `~/.tokeep/config.yaml` directly:
 
 ```yaml
 scan_path: /home/you
@@ -124,6 +158,8 @@ deny_list:
 backup:
   vault_name: tokeep-vault
   retention_count: 5
+  bwlimit: null    # e.g. "10m" to limit bandwidth
+  gpg_key_id: null # GPG key for --encrypt
   global_excludes:
     - node_modules
     - .venv
@@ -137,6 +173,10 @@ backup:
     - "*.key"
     - credentials.json
     - token.json
+notifications:
+  enabled: false
+  desktop: true
+  email: null      # e.g. "you@example.com"
 ```
 
 ### Deny List
@@ -150,6 +190,19 @@ deny_list:
     - confidential
   paths:
     - /home/you/sensitive-project
+```
+
+## Development
+
+```bash
+pip install -e .
+pip install pytest ruff
+
+# Run tests
+pytest tests/ -v
+
+# Lint
+ruff check tokeep/ tests/
 ```
 
 ## State Files

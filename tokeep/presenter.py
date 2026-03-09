@@ -1,6 +1,5 @@
 """Rich TUI: panels, prompts, progress, tables."""
 
-from datetime import datetime
 
 from rich.console import Console
 from rich.panel import Panel
@@ -12,7 +11,7 @@ from rich import box
 
 from tokeep.shakespeare import (
     get_banner, get_confirmation, get_farewell,
-    get_drive_message, get_progress_message,
+    get_drive_message,
 )
 
 console = Console()
@@ -207,7 +206,7 @@ def prompt_project_selection(projects: list, togit_decisions: dict | None = None
     if not available:
         return auto_included
 
-    console.print(f"\n[bold]Select additional projects to back up:[/]")
+    console.print("\n[bold]Select additional projects to back up:[/]")
     console.print("[dim]Enter numbers separated by commas, 'all' for all, or 'none' to skip.[/]\n")
 
     for i, project in enumerate(available, 1):
@@ -470,6 +469,70 @@ def show_schedule_confirmation(schedule: str, drive_path: str, cron_entry: str):
     ))
 
     confirmation = get_confirmation("schedule")
+    console.print(f"\n[italic dim]{confirmation}[/]\n")
+
+
+def show_restore_result(result):
+    """Display restore results."""
+    if result.success:
+        style = "green"
+        title = "Restore Complete"
+    else:
+        style = "red"
+        title = "Restore Failed"
+
+    lines = []
+    lines.append(f"  Project:    [bold]{result.project_name}[/]")
+    lines.append(f"  Snapshot:   {result.snapshot_name}")
+    lines.append(f"  Restored to: [dim]{result.dest_path}[/]")
+    if result.files_restored:
+        lines.append(f"  Files:      {result.files_restored}")
+    if result.bytes_restored:
+        lines.append(f"  Size:       {_human_size(result.bytes_restored)}")
+    lines.append(f"  Duration:   {_format_duration(result.duration_seconds)}")
+
+    if result.error:
+        lines.append(f"\n  [red]Error: {result.error}[/]")
+
+    body = "\n".join(lines)
+
+    console.print(Panel(
+        body,
+        title=f"[bold {style}]{title}[/]",
+        border_style=style,
+        box=box.ROUNDED,
+        padding=(1, 2),
+    ))
+
+
+def show_encrypt_result(result):
+    """Display encryption results."""
+    if result.success:
+        console.print(Panel(
+            f"  Archive: [dim]{result.archive_path}[/]\n"
+            f"  Original: {_human_size(result.original_size)}\n"
+            f"  Encrypted: {_human_size(result.encrypted_size)}",
+            title="[bold green]Encryption Complete[/]",
+            border_style="green",
+            box=box.ROUNDED,
+            padding=(1, 2),
+        ))
+    else:
+        console.print(f"[red]Encryption failed: {result.error}[/]")
+
+
+def show_init_complete(config_path: str):
+    """Display config init confirmation."""
+    console.print(Panel(
+        f"  Config saved to: [dim]{config_path}[/]\n"
+        f"  Edit this file to customize further.",
+        title="[bold green]Configuration Initialized[/]",
+        border_style="green",
+        box=box.ROUNDED,
+        padding=(1, 2),
+    ))
+
+    confirmation = get_confirmation("backup")
     console.print(f"\n[italic dim]{confirmation}[/]\n")
 
 

@@ -3,7 +3,7 @@
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from tokeep.manifest import Manifest, _structural_checksum, content_checksum
+from tokeep.manifest import Manifest, _structural_checksum
 
 
 @dataclass
